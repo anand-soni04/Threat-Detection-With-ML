@@ -18,7 +18,11 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max upload
 # Enable CORS
 CORS(app, resources={
     r"/api/*": {
-        "origins": "*",
+        "origins": [
+            "http://localhost:3000",
+            "https://*.vercel.app",  # allows all vercel preview URLs
+            "https://your-actual-domain.vercel.app",  # add your exact URL after deploy
+        ],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
@@ -39,4 +43,10 @@ with app.app_context():
     db.create_all()
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001, host="0.0.0.0")
+    import os
+    app.run(
+        debug=False,
+        port=int(os.environ.get("PORT", 5001)),
+        host="0.0.0.0"
+    )
+    
