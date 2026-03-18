@@ -1,0 +1,7 @@
+DataSet/
+*.csv
+*.pcap
+*.pcap_ISCX.csv
+.idea/
+.DS_Store
+__pycache__/
