@@ -21,7 +21,7 @@ CORS(app, resources={
         "origins": [
             "http://localhost:3000",
             "https://threat-backend-0wk6.onrender.com",
-            "https://threat-frontend.vercel.app",
+            "https://threat-detection-with-ml.vercel.app",
         ],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
