@@ -111,7 +111,6 @@ export default function DetectionPage() {
       setModelMetrics(metrics);
       setDetectionResults(results);
 
-      // update radar chart from real model metrics
       setModelPerformance([
         { metric: "Accuracy",  value: metrics.accuracy,  fullMark: 100 },
         { metric: "Precision", value: metrics.precision, fullMark: 100 },
@@ -119,10 +118,7 @@ export default function DetectionPage() {
         { metric: "F1 Score",  value: metrics.f1_score,  fullMark: 100 },
       ]);
 
-      // update pie chart
       if (latestUpload) {
-        // use attack_ratio from latest upload — real % of malicious rows
-        // use min 0.5 so even tiny attack ratios show as a visible slice
         const attackPct = parseFloat(latestUpload.attack_ratio.toFixed(2));
         const normalPct = parseFloat((100 - attackPct).toFixed(2));
         const maliciousColor =
@@ -141,7 +137,6 @@ export default function DetectionPage() {
           },
         ]);
       } else {
-        // initial state before any file is analysed — always show 100% Normal
         setThreatDistribution([
           {
             name: "Normal",
@@ -168,9 +163,8 @@ export default function DetectionPage() {
     setUploadResult(null);
     try {
       if (uploadedFile) {
-        const res = await detectionApi.uploadFile(uploadedFile) as UploadResult;
+        const res = (await detectionApi.uploadFile(uploadedFile)) as UploadResult;
         setUploadResult(res);
-        // pass upload result so pie chart uses attack_ratio from this file
         await fetchPageData(res);
       } else {
         await detectionApi.runDetection({

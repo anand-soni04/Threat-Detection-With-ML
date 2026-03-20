@@ -11,3 +11,4 @@ joblib==1.5.3
 
 python-dotenv==1.2.1
 requests==2.32.5
+cicflowmeter
