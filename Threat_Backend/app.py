@@ -20,7 +20,7 @@ CORS(app, resources={
     r"/api/*": {
         "origins": [
             "http://localhost:3000",
-            "https://threat-detection-with-ml.onrender.com",
+            "https://threat-backend.onrender.com",
             "https://threat-frontend.vercel.app",
         ],
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
