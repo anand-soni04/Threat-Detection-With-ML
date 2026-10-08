@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
+import { cn, formatTimestamp } from "@/lib/utils";
 import {
   Search,
   Filter,
@@ -23,11 +23,15 @@ import {
   ChevronRight,
   Clock,
   Server,
+  AlertTriangle,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { logsApi, Log } from "@/lib/api";
-import { useEffect } from "react";
+
+const POLL_MS = 5000;
+const SEARCH_DEBOUNCE_MS = 300;
+const LOG_LIMIT = 1000;
 
 const levelColors = {
   ERROR: "bg-destructive text-destructive-foreground",
@@ -39,10 +43,19 @@ const levelColors = {
 export default function LogsPage() {
   const [logs, setLogs] = useState<Log[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [levelFilter, setLevelFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [knownSources, setKnownSources] = useState<string[]>([]);
   const [expandedLogs, setExpandedLogs] = useState<number[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  // Only the newest request may update the screen, so a slow response for an
+  // old search can never overwrite the results of a newer one.
+  const requestId = useRef(0);
 
   const toggleExpand = (id: number) => {
     setExpandedLogs((prev) =>
@@ -50,49 +63,62 @@ export default function LogsPage() {
     );
   };
 
-  const filteredLogs = logs.filter((log) => {
-    const matchesSearch =
-      log.message.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.source.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.service.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesLevel = levelFilter === "all" || log.level === levelFilter;
-    const matchesSource = sourceFilter === "all" || log.source === sourceFilter;
-    return matchesSearch && matchesLevel && matchesSource;
-  });
+  // Wait for a pause in typing before querying the backend.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
-  const sources = Array.from(new Set(logs.map((log) => log.source)));
-
-useEffect(() => {
-  const interval = setInterval(async () => {
+  // Search, level and source are all applied by the backend, so results cover
+  // the whole log history rather than only what happens to be loaded.
+  const fetchLogs = useCallback(async () => {
+    const id = ++requestId.current;
     try {
-      const data = await logsApi.getAll();
+      const data = await logsApi.getAll({
+        q: debouncedQuery || undefined,
+        level: levelFilter !== "all" ? levelFilter : undefined,
+        source: sourceFilter !== "all" ? sourceFilter : undefined,
+        limit: LOG_LIMIT,
+      });
+      if (id !== requestId.current) return;
       setLogs(data);
-    } catch (error) {
-      console.error(error);
+      setError(null);
+      setLastUpdated(new Date());
+      // Remember every source ever seen so the dropdown does not shrink to the
+      // one source currently selected.
+      setKnownSources((prev) =>
+        Array.from(new Set([...prev, ...data.map((l) => l.source)])).sort()
+      );
+    } catch (err) {
+      if (id !== requestId.current) return;
+      console.error("Failed to load logs:", err);
+      setError("Could not load logs from the server. Retrying automatically...");
+    } finally {
+      if (id === requestId.current) setIsLoading(false);
     }
-  }, 5000);
+  }, [debouncedQuery, levelFilter, sourceFilter]);
 
-  return () => clearInterval(interval);
-}, []);
-
+  // Load immediately, and again whenever the search/filters change, then poll
+  // using the same search/filters.
+  useEffect(() => {
+    fetchLogs();
+    const interval = setInterval(fetchLogs, POLL_MS);
+    return () => clearInterval(interval);
+  }, [fetchLogs]);
 
   const handleRefresh = async () => {
-  setIsRefreshing(true);
+    setIsRefreshing(true);
+    await fetchLogs();
+    setIsRefreshing(false);
+  };
 
-  try {
-    const data = await logsApi.getAll({
-      level: levelFilter !== "all" ? levelFilter : undefined,
-      source: sourceFilter !== "all" ? sourceFilter : undefined,
-    });
-
-    setLogs(data);
-  } catch (error) {
-    console.error("Failed to refresh logs:", error);
-  }
-
-  setIsRefreshing(false);
-};
-
+  const filteredLogs = logs;
+  const sources =
+    sourceFilter !== "all" && !knownSources.includes(sourceFilter)
+      ? [...knownSources, sourceFilter]
+      : knownSources;
+  const hasActiveFilters =
+    debouncedQuery.trim() !== "" || levelFilter !== "all" || sourceFilter !== "all";
 
   const handleExport = () => {
     const lines = filteredLogs.map(
@@ -138,7 +164,7 @@ useEffect(() => {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
-                    placeholder="Search logs by message, source, or service..."
+                    placeholder="Search logs... e.g. malicious, level:ERROR, service:ml-model-upload"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="pl-10 bg-input border-border font-mono"
@@ -180,15 +206,43 @@ useEffect(() => {
         <Card className="bg-card border-border">
           <CardHeader className="pb-2">
             <CardTitle className="text-foreground flex items-center justify-between">
-              <span>Log Events ({filteredLogs.length})</span>
-              <Badge variant="outline" className="text-primary border-primary">
+              <span>
+                Log Events ({filteredLogs.length}
+                {filteredLogs.length >= LOG_LIMIT ? "+" : ""})
+              </span>
+              <Badge
+                variant="outline"
+                className={error ? "text-destructive border-destructive" : "text-primary border-primary"}
+              >
                 <Clock className="w-3 h-3 mr-1" />
-                Real-time
+                {error
+                  ? "Disconnected"
+                  : lastUpdated
+                  ? `Live · ${lastUpdated.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}`
+                  : "Connecting..."}
               </Badge>
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
+            {error && (
+              <div className="flex items-center gap-2 px-4 py-3 text-sm text-destructive border-b border-border">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {error}
+              </div>
+            )}
             <ScrollArea className="h-[600px]">
+              {filteredLogs.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-[300px] text-muted-foreground">
+                  <Search className="w-12 h-12 mb-3 opacity-20" />
+                  <p>
+                    {isLoading
+                      ? "Loading logs..."
+                      : hasActiveFilters
+                      ? "No logs match your search or filters"
+                      : "No logs yet"}
+                  </p>
+                </div>
+              )}
               <div className="divide-y divide-border">
                 {filteredLogs.map((log) => (
                   <div
@@ -208,13 +262,16 @@ useEffect(() => {
                       </button>
                       <div className="flex-1 min-w-0 space-y-1">
                         <div className="flex items-center gap-3 flex-wrap">
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {log.timestamp}
+                          <span
+                            className="font-mono text-xs text-muted-foreground"
+                            title={log.timestamp}
+                          >
+                            {formatTimestamp(log.timestamp)}
                           </span>
                           <Badge
                             className={cn(
                               "text-xs",
-                              levelColors[log.level]
+                              levelColors[log.level] ?? levelColors.INFO
                             )}
                           >
                             {log.level}

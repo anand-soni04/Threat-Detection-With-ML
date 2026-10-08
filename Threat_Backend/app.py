@@ -1,3 +1,5 @@
+import os
+
 from flask import Flask
 from flask_cors import CORS
 from config import Config
@@ -15,14 +17,19 @@ app = Flask(__name__)
 app.config.from_object(Config)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max upload
 
-# Enable CORS
+# Enable CORS. Browsers may only call the API from these origins.
+# Override with a comma-separated ALLOWED_ORIGINS environment variable
+# (e.g. to add a custom domain or another frontend deployment).
+DEFAULT_ORIGINS = "https://threat-detection-with-ml.vercel.app"
+ALLOWED_ORIGINS = [
+    o.strip().rstrip("/")
+    for o in os.environ.get("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
+    if o.strip()
+]
+
 CORS(app, resources={
     r"/api/*": {
-        "origins": [
-            "http://localhost:3000",
-            "https://threat-backend-0wk6.onrender.com",
-            "https://threat-detection-with-ml.vercel.app",
-        ],
+        "origins": ALLOWED_ORIGINS,
         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }

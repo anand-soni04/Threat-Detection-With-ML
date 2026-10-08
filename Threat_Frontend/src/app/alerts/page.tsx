@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { alertsApi, Alert } from "@/lib/api";
 
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -36,7 +36,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+import { cn, formatTimestamp, prettyLabel } from "@/lib/utils";
 import {
   Search,
   Filter,
@@ -48,6 +48,7 @@ import {
   Shield,
   Bug,
   Mail,
+  RotateCcw,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -80,65 +81,83 @@ export default function AlertsPage() {
   const [severityFilter, setSeverityFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-const filteredAlerts = alerts.filter((alert) => {
-  const matchesSearch =
-    alert.message.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    alert.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    alert.source.toLowerCase().includes(searchQuery.toLowerCase());
+  // Every word must appear somewhere in the alert, in any of these fields.
+  const matchesSearch = (alert: Alert, query: string) => {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return true;
+    const haystack = [
+      alert.id,
+      alert.type,
+      prettyLabel(alert.type),
+      alert.severity,
+      alert.status,
+      alert.source,
+      alert.target,
+      alert.detected_by ?? "",
+      alert.message,
+      alert.log_id != null ? `log ${alert.log_id}` : "",
+      formatTimestamp(alert.timestamp),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return terms.every((t) => haystack.includes(t));
+  };
 
-  const matchesSeverity =
-    severityFilter === "all" || alert.severity === severityFilter;
+  const filteredAlerts = alerts.filter((alert) => {
+    const matchesSeverity =
+      severityFilter === "all" || alert.severity === severityFilter;
 
-  const matchesStatus =
-    statusFilter === "all" || alert.status === statusFilter;
+    // Dismissed alerts are hidden from "All" and only shown when asked for.
+    const matchesStatus =
+      statusFilter === "all"
+        ? alert.status !== "dismissed"
+        : alert.status === statusFilter;
 
-  return matchesSearch && matchesSeverity && matchesStatus;
-});
+    return matchesSearch(alert, searchQuery) && matchesSeverity && matchesStatus;
+  });
 
-
-  useEffect(() => {
-  const loadAlerts = async () => {
+  const loadAlerts = useCallback(async () => {
     try {
       const data = await alertsApi.getAll();
-
-      const sorted = data.sort(
-        (a, b) =>
-          new Date(b.timestamp).getTime() -
-          new Date(a.timestamp).getTime()
+      const sorted = [...data].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
       );
-
       setAlerts(sorted);
-    } catch (error) {
-      console.error("Failed to fetch alerts:", error);
+      setError(null);
+    } catch (err) {
+      console.error("Failed to fetch alerts:", err);
+      setError("Could not load alerts from the server. Retrying automatically...");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAlerts();
+    const interval = setInterval(loadAlerts, 5000);
+    return () => clearInterval(interval);
+  }, [loadAlerts]);
+
+  const updateAlertStatus = async (id: string, status: Alert["status"]) => {
+    const previous = alerts;
+    // Optimistic update, rolled back if the server rejects it.
+    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status } : a)));
+    setSelectedAlert((cur) => (cur && cur.id === id ? { ...cur, status } : cur));
+    try {
+      await alertsApi.updateStatus(id, status);
+    } catch (err) {
+      console.error("Failed to update alert:", err);
+      setAlerts(previous);
+      setError("Could not update the alert. Please try again.");
     }
   };
 
-  loadAlerts();
-
-  const interval = setInterval(loadAlerts, 5000);
-
-  return () => clearInterval(interval);
-}, []);
-
-
-
-  const updateAlertStatus = async (id: string, status: Alert["status"]) => {
-  try {
-    await alertsApi.updateStatus(id, status);
-
-    setAlerts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, status } : a))
-    );
-  } catch (error) {
-    console.error("Failed to update alert:", error);
-  }
-};
-
-
-  const dismissAlert = (id: string) => {
-    setAlerts((prev) => prev.filter((a) => a.id !== id));
-  };
+  // Saved on the server (status "dismissed") so it stays dismissed after the
+  // next refresh instead of reappearing.
+  const dismissAlert = (id: string) => updateAlertStatus(id, "dismissed");
 
   return (
     <DashboardLayout>
@@ -171,7 +190,7 @@ const filteredAlerts = alerts.filter((alert) => {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
-                    placeholder="Search alerts..."
+                    placeholder="Search alerts by ID, type, source, target, message, status..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="pl-10 bg-input border-border"
@@ -200,6 +219,7 @@ const filteredAlerts = alerts.filter((alert) => {
                   <SelectItem value="open">Open</SelectItem>
                   <SelectItem value="investigating">Investigating</SelectItem>
                   <SelectItem value="resolved">Resolved</SelectItem>
+                  <SelectItem value="dismissed">Dismissed</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -214,10 +234,22 @@ const filteredAlerts = alerts.filter((alert) => {
             </CardTitle>
           </CardHeader>
           <CardContent>
+            {error && (
+              <div className="flex items-center gap-2 mb-4 text-sm text-destructive">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {error}
+              </div>
+            )}
             {filteredAlerts.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                 <AlertTriangle className="w-12 h-12 mb-3 opacity-20" />
-                <p>No alerts match your filters</p>
+                <p>
+                  {isLoading
+                    ? "Loading alerts..."
+                    : alerts.length === 0
+                    ? "No alerts yet"
+                    : "No alerts match your filters"}
+                </p>
               </div>
             ) : (
               <Table>
@@ -226,7 +258,7 @@ const filteredAlerts = alerts.filter((alert) => {
                     <TableHead className="text-muted-foreground">ID</TableHead>
                     <TableHead className="text-muted-foreground">Type</TableHead>
                     <TableHead className="text-muted-foreground">Severity</TableHead>
-                    <TableHead className="text-muted-foreground">Source</TableHead>
+                    <TableHead className="text-muted-foreground" title="Where the anomaly came from">Source</TableHead>
                     <TableHead className="text-muted-foreground">Target</TableHead>
                     <TableHead className="text-muted-foreground">Message</TableHead>
                     <TableHead className="text-muted-foreground">Time</TableHead>
@@ -251,7 +283,7 @@ const filteredAlerts = alerts.filter((alert) => {
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <TypeIcon className="w-4 h-4 text-muted-foreground" />
-                            <span className="text-foreground">{alert.type}</span>
+                            <span className="text-foreground">{prettyLabel(alert.type)}</span>
                           </div>
                         </TableCell>
                         <TableCell>
@@ -266,17 +298,23 @@ const filteredAlerts = alerts.filter((alert) => {
                             {alert.severity}
                           </Badge>
                         </TableCell>
-                        <TableCell className="font-mono text-sm text-muted-foreground">
+                        <TableCell
+                          className="font-mono text-sm text-muted-foreground whitespace-normal break-all max-w-[190px]"
+                          title={alert.source}
+                        >
                           {alert.source}
                         </TableCell>
                         <TableCell className="text-muted-foreground">
                           {alert.target}
                         </TableCell>
-                        <TableCell className="max-w-[300px] truncate text-foreground">
+                        <TableCell className="max-w-[200px] truncate text-foreground" title={alert.message}>
                           {alert.message}
                         </TableCell>
-                        <TableCell className="text-muted-foreground text-sm">
-                          {alert.timestamp}
+                        <TableCell
+                          className="text-muted-foreground text-sm whitespace-normal min-w-[110px] max-w-[130px]"
+                          title={alert.timestamp}
+                        >
+                          {formatTimestamp(alert.timestamp)}
                         </TableCell>
                         <TableCell>
                           <Badge
@@ -320,7 +358,7 @@ const filteredAlerts = alerts.filter((alert) => {
                               <DropdownMenuItem
                                 onClick={() => updateAlertStatus(alert.id, "open")}
                               >
-                                <AlertTriangle className="w-4 h-4 mr-2" />
+                                <RotateCcw className="w-4 h-4 mr-2" />
                                 Reopen
                               </DropdownMenuItem>
                               <DropdownMenuItem
@@ -359,7 +397,7 @@ const filteredAlerts = alerts.filter((alert) => {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-muted-foreground mb-1">Type</p>
-                  <p className="text-foreground font-medium">{selectedAlert.type}</p>
+                  <p className="text-foreground font-medium">{prettyLabel(selectedAlert.type)}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground mb-1">Severity</p>
@@ -368,16 +406,20 @@ const filteredAlerts = alerts.filter((alert) => {
                   </Badge>
                 </div>
                 <div>
-                  <p className="text-muted-foreground mb-1">Source</p>
-                  <p className="text-foreground font-mono">{selectedAlert.source}</p>
+                  <p className="text-muted-foreground mb-1">Source (origin)</p>
+                  <p className="text-foreground font-mono break-all">{selectedAlert.source}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground mb-1">Target</p>
                   <p className="text-foreground font-mono">{selectedAlert.target}</p>
                 </div>
                 <div>
+                  <p className="text-muted-foreground mb-1">Detected by</p>
+                  <p className="text-foreground font-mono">{selectedAlert.detected_by ?? "ml-detector"}</p>
+                </div>
+                <div>
                   <p className="text-muted-foreground mb-1">Timestamp</p>
-                  <p className="text-foreground">{selectedAlert.timestamp}</p>
+                  <p className="text-foreground">{formatTimestamp(selectedAlert.timestamp)}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground mb-1">Status</p>
@@ -412,6 +454,7 @@ const filteredAlerts = alerts.filter((alert) => {
                     dismissAlert(selectedAlert.id);
                     setSelectedAlert(null);
                   }}
+                  disabled={selectedAlert.status === "dismissed"}
                 >
                   <XCircle className="w-4 h-4 mr-2" />
                   Dismiss

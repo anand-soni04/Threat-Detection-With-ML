@@ -3,11 +3,12 @@ from database.models import db, ApsiDataset
 
 apsi_bp = Blueprint("apsi", __name__)
 
+
 @apsi_bp.route("/apsi", methods=["POST"])
 def add_apsi_data():
     """Add a single APSI dataset entry"""
     data = request.json
-    
+
     apsi_entry = ApsiDataset(
         duration=data.get("duration", 0),
         protocol_type=data.get("protocol_type", "tcp"),
@@ -43,18 +44,19 @@ def add_apsi_data():
     )
     db.session.add(apsi_entry)
     db.session.commit()
-    
+
     return jsonify({
         "message": "APSI data added",
         "id": apsi_entry.id
     })
+
 
 @apsi_bp.route("/apsi/bulk", methods=["POST"])
 def add_apsi_bulk():
     """Add multiple APSI dataset entries at once"""
     data = request.json
     entries = data.get("entries", [])
-    
+
     added_ids = []
     for entry in entries:
         apsi_entry = ApsiDataset(
@@ -92,13 +94,14 @@ def add_apsi_bulk():
         )
         db.session.add(apsi_entry)
         added_ids.append(apsi_entry.id)
-    
+
     db.session.commit()
-    
+
     return jsonify({
         "message": f"Added {len(added_ids)} APSI entries",
         "ids": added_ids
     })
+
 
 @apsi_bp.route("/apsi", methods=["GET"])
 def get_apsi_data():
@@ -107,18 +110,18 @@ def get_apsi_data():
     per_page = request.args.get("per_page", 50, type=int)
     label_filter = request.args.get("label", type=int)
     attack_type_filter = request.args.get("attack_type", type=str)
-    
+
     query = ApsiDataset.query
-    
+
     if label_filter is not None:
         query = query.filter(ApsiDataset.label == label_filter)
     if attack_type_filter:
         query = query.filter(ApsiDataset.attack_type == attack_type_filter)
-    
+
     pagination = query.order_by(ApsiDataset.timestamp.desc()).paginate(
         page=page, per_page=per_page, error_out=False
     )
-    
+
     return jsonify({
         "data": [{
             "id": d.id,
@@ -142,13 +145,14 @@ def get_apsi_data():
         "pages": pagination.pages
     })
 
+
 @apsi_bp.route("/apsi/<id>", methods=["GET"])
 def get_apsi_entry(id):
     """Get a specific APSI dataset entry"""
     entry = ApsiDataset.query.get(id)
     if not entry:
         return jsonify({"error": "APSI entry not found"}), 404
-    
+
     return jsonify({
         "id": entry.id,
         "duration": entry.duration,
@@ -186,17 +190,19 @@ def get_apsi_entry(id):
         "is_trained": entry.is_trained
     })
 
+
 @apsi_bp.route("/apsi/<id>", methods=["DELETE"])
 def delete_apsi_entry(id):
     """Delete an APSI dataset entry"""
     entry = ApsiDataset.query.get(id)
     if not entry:
         return jsonify({"error": "APSI entry not found"}), 404
-    
+
     db.session.delete(entry)
     db.session.commit()
-    
+
     return jsonify({"message": "APSI entry deleted successfully"})
+
 
 @apsi_bp.route("/apsi/stats", methods=["GET"])
 def get_apsi_stats():
@@ -205,13 +211,13 @@ def get_apsi_stats():
     normal_count = ApsiDataset.query.filter(ApsiDataset.label == 0).count()
     malicious_count = ApsiDataset.query.filter(ApsiDataset.label == 1).count()
     trained_count = ApsiDataset.query.filter(ApsiDataset.is_trained == True).count()
-    
+
     # Attack type distribution
     attack_types = db.session.query(
-        ApsiDataset.attack_type, 
+        ApsiDataset.attack_type,
         db.func.count(ApsiDataset.id)
     ).group_by(ApsiDataset.attack_type).all()
-    
+
     return jsonify({
         "total": total,
         "normal": normal_count,

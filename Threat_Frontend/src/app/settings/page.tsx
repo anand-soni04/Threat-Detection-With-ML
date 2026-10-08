@@ -27,6 +27,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 
 type SavedTab = "general" | "notifications" | "security" | "api" | null;
 
@@ -75,7 +76,7 @@ export default function SettingsPage() {
   const [showNewPw, setShowNewPw]         = useState(false);
 
   // ── API ───────────────────────────────────────────────────────────────────
-  const [apiUrl, setApiUrl]           = useState(() => load("settings.apiUrl", "http://localhost:5001"));
+  const [apiUrl, setApiUrl]           = useState(() => load("settings.apiUrl", API_BASE_URL));
   const [apiKey, setApiKey]           = useState(() => load("settings.apiKey", "sk-xxxxxxxxxxxxxxxxxx"));
   const [showApiKey, setShowApiKey]   = useState(false);
   const [apiLogging, setApiLogging]   = useState(() => load("settings.apiLogging", true));

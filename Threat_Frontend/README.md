@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DefendX Frontend
 
-## Getting Started
+Next.js 16 (App Router) dashboard for the Threat Detection with ML project. It talks to the Flask API in `../Threat_Backend` over HTTPS.
 
-First, run the development server:
+**Live:** https://threat-detection-with-ml.vercel.app
+
+See the [main README](../README.md) for the full architecture, API reference and deployment guide.
+
+## Setup
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # prints the address to open in your browser
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+| Script | Purpose |
+|---|---|
+| `npm run dev` | Development server with hot reload |
+| `npm run build` | Production build |
+| `npm start` | Serve the production build |
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configuration
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Variable | Purpose | Default |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | Base URL of the backend API, no trailing slash | `https://threat-backend-0wk6.onrender.com` |
 
-## Learn More
+Put it in `.env.local` for development. Production builds also read `.env.production`. It is embedded at **build time**, so redeploy after changing it. The backend must list this app's origin in its `ALLOWED_ORIGINS`, otherwise the browser blocks the requests (CORS).
 
-To learn more about Next.js, take a look at the following resources:
+## Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+src/
+├── app/            # Routes: / (dashboard), detection, alerts, logs, search, analytics, sources, settings
+├── components/     # layout/ (sidebar, header), dashboard/ widgets, ui/ (shadcn/ui)
+└── lib/
+    ├── api.ts      # Typed API client (all backend calls live here)
+    ├── search.ts   # Search-term parsing used for result highlighting
+    └── utils.ts    # Class names, timestamp formatting helpers
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Deploying to Vercel
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Import the repository in Vercel.
+2. Set **Root Directory** to `Threat_Frontend` and the framework preset to **Next.js**.
+3. Add `NEXT_PUBLIC_API_URL` pointing at your backend, then deploy.
+4. Later pushes to the connected branch redeploy automatically.

@@ -1,14 +1,18 @@
-  export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+  export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "https://threat-backend-0wk6.onrender.com";
 
   export interface Alert {
     id: string;
     type: string;
     severity: "critical" | "high" | "medium" | "low";
+    /** Where the anomaly came from (IP, host, "upload:<file>", ...). */
     source: string;
     target: string;
+    /** Component that raised the alert (e.g. "ml-detector"). */
+    detected_by?: string;
     message: string;
     timestamp: string;
-    status: "open" | "investigating" | "resolved";
+    status: "open" | "investigating" | "resolved" | "dismissed";
+    log_id?: number | null;
   }
 
   export interface Log {
@@ -18,6 +22,7 @@
     source: string;
     service: string;
     message: string;
+    prediction?: string | null;
     details: Record<string, unknown>;
   }
 
@@ -84,22 +89,49 @@
         method: "PATCH",
         body: JSON.stringify({ status }),
       }),
+    delete: (id: string) =>
+      fetchWithErrorHandling<{ message: string }>(`/api/alerts/${id}`, {
+        method: "DELETE",
+      }),
   };
 
   // Logs API
+  export type TimeRange = "15m" | "1h" | "24h" | "7d" | "30d" | "all";
+
   export const logsApi = {
-    getAll: (params?: { level?: string; source?: string; limit?: number }) => {
+    /** List logs. `q` accepts the same syntax as search (e.g. "level:ERROR malicious"). */
+    getAll: (params?: {
+      q?: string;
+      level?: string;
+      source?: string;
+      range?: TimeRange;
+      limit?: number;
+    }) => {
       const searchParams = new URLSearchParams();
+      if (params?.q?.trim()) searchParams.set("q", params.q.trim());
       if (params?.level) searchParams.set("level", params.level);
       if (params?.source) searchParams.set("source", params.source);
+      if (params?.range && params.range !== "all") searchParams.set("range", params.range);
       if (params?.limit) searchParams.set("limit", params.limit.toString());
       const queryString = searchParams.toString();
       return fetchWithErrorHandling<Log[]>(
         `/api/logs${queryString ? `?${queryString}` : ""}`
       );
     },
-    search: (query: string) =>
-      fetchWithErrorHandling<Log[]>(`/api/logs/search?q=${encodeURIComponent(query)}`),
+    search: (query: string, range: TimeRange = "all", limit = 500) => {
+      const p = new URLSearchParams({ q: query, limit: String(limit) });
+      if (range !== "all") p.set("range", range);
+      return fetchWithErrorHandling<Log[]>(`/api/logs/search?${p.toString()}`);
+    },
+    /** Number of logs matching a query (used for saved-search hit counts). */
+    count: async (query: string, range: TimeRange = "all") => {
+      const p = new URLSearchParams({ q: query, count: "1" });
+      if (range !== "all") p.set("range", range);
+      const res = await fetchWithErrorHandling<{ count: number }>(
+        `/api/logs/search?${p.toString()}`
+      );
+      return res.count;
+    },
   };
 
   // Detection API

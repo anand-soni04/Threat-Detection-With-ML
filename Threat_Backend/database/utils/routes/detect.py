@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import io
 from database.utils.preprocess import preprocess
+from database.utils.serializers import UNKNOWN_ORIGIN
 from database.models import db, Log, Alert, TrainingData, ModelMetadata
 
 detect_bp = Blueprint("detect", __name__)
@@ -73,8 +74,10 @@ def detect_threat():
             severity="critical",
             status="open",
             type="threat_detection",
-            source="ml-detector",
-            target=data.get("source", "system"),
+            # source = where the anomaly came from; the detector itself is
+            # reported separately as `detected_by` by the API.
+            source=data.get("source") or UNKNOWN_ORIGIN,
+            target=data.get("target") or "system",
             message=f"Threat detected - {result} (confidence: {confidence:.2f})",
         )
         db.session.add(alert)
@@ -236,7 +239,7 @@ def detect_threat_upload():
             source="upload-threat-detector",
             service="ml-model-upload",
             message=f"CSV upload analysis: {final_result} — {malicious_count}/{total} rows malicious ({attack_ratio:.2f}%)",
-            level="ERROR" if final_result == "Malicious" else "WARNING" if final_result == "Suspicious" else "INFO",
+            level="ERROR" if final_result == "Malicious" else "WARN" if final_result == "Suspicious" else "INFO",
             details=json.dumps({
                 "file": file.filename,
                 "total_rows": total,
@@ -256,8 +259,8 @@ def detect_threat_upload():
                 severity=alert_severity,
                 status="open",
                 type="threat_detection",
-                source="ml-detector",
-                target="upload",
+                source=f"upload:{file.filename}",
+                target="system",
                 message=f"{final_result} activity detected in uploaded file — {malicious_count}/{total} malicious rows ({attack_ratio:.2f}%)",
             )
             db.session.add(alert)

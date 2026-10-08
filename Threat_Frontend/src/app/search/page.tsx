@@ -1,7 +1,9 @@
 "use client";
 
-import React, { Suspense, useState, useEffect, useCallback } from "react";
-import { logsApi, Log } from "@/lib/api";
+import React, { Suspense, useState, useEffect, useCallback, useRef } from "react";
+import { logsApi, Log, TimeRange } from "@/lib/api";
+import { cn, formatTimestamp, timeAgo } from "@/lib/utils";
+import { parseSearchTerms } from "@/lib/search";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -22,42 +24,68 @@ import {
   Trash2,
   Play,
   X,
+  AlertTriangle,
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 
-type SavedSearch = { id: number; name: string; query: string; hits: number };
-type RecentSearch = { query: string; time: string };
+type SavedSearch = { id: number; name: string; query: string };
+type RecentSearch = { query: string; at: number };
 type SearchResult = Log;
 
-const initialSavedSearches: SavedSearch[] = [
-  { id: 1, name: "Failed SSH Logins", query: "ssh", hits: 0 },
-  { id: 2, name: "Malware Detections", query: "malicious", hits: 0 },
-  { id: 3, name: "SQL Injection Attempts", query: "sql", hits: 0 },
-  { id: 4, name: "Phishing Emails", query: "phishing", hits: 0 },
+// These match what this app actually logs (ML predictions, log levels and
+// services), so every saved search can return real results.
+const defaultSavedSearches: SavedSearch[] = [
+  { id: 1, name: "Malicious Detections", query: "prediction:malicious" },
+  { id: 2, name: "Error-level Events", query: "level:ERROR" },
+  { id: 3, name: "Suspicious (Warnings)", query: "level:WARN" },
+  { id: 4, name: "CSV Upload Analyses", query: "service:ml-model-upload" },
 ];
 
-const initialRecentSearches: RecentSearch[] = [
-  { query: "source:firewall-01 AND action:DROP", time: "5 min ago" },
-  { query: "level:ERROR", time: "15 min ago" },
-  { query: "service:nginx AND status:500", time: "1 hour ago" },
-  { query: "user:admin AND action:login", time: "2 hours ago" },
-];
+const RECENT_KEY = "threat-search:recent";
+const SAVED_KEY = "threat-search:saved";
+const MAX_RECENT = 6;
 
-function highlightText(message: string, term: string) {
-  if (!term) return <span>{message}</span>;
+const levelColors: Record<string, string> = {
+  ERROR: "bg-destructive text-destructive-foreground",
+  WARN: "bg-[#d29922] text-[#0d1117]",
+  INFO: "bg-accent text-accent-foreground",
+  DEBUG: "bg-muted text-muted-foreground",
+};
 
-  const parts = message.split(
-    new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi")
-  );
+function loadStored<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStored(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* storage unavailable (private mode, quota) - searches just won't persist */
+  }
+}
+
+/** Wrap every occurrence of any search term in <mark>. */
+function highlightText(text: string, terms: string[]) {
+  const usable = terms.filter(Boolean);
+  if (usable.length === 0) return <span>{text}</span>;
+
+  const pattern = usable
+    .sort((x, y) => y.length - x.length)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  // With one capture group, split() puts every match at an odd index.
+  const parts = text.split(new RegExp(`(${pattern})`, "gi"));
 
   return (
     <>
       {parts.map((part, i) =>
-        part.toLowerCase() === term.toLowerCase() ? (
-          <mark
-            key={i}
-            className="bg-[#d29922]/30 text-[#d29922] px-1 rounded"
-          >
+        i % 2 === 1 ? (
+          <mark key={i} className="bg-[#d29922]/30 text-[#d29922] px-1 rounded">
             {part}
           </mark>
         ) : (
@@ -72,83 +100,141 @@ function SearchContent() {
   const searchParams = useSearchParams();
 
   const [searchQuery, setSearchQuery] = useState(searchParams.get("q") ?? "");
-  const [timeRange, setTimeRange] = useState("24h");
+  // The demo data can be old, so default to everything rather than "24h",
+  // which would show no results for logs older than a day.
+  const [timeRange, setTimeRange] = useState<TimeRange>("all");
   const [hasSearched, setHasSearched] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [activeTerms, setActiveTerms] = useState<string[]>([]);
+  const [lastQuery, setLastQuery] = useState("");
   const [savedSearches, setSavedSearches] =
-    useState<SavedSearch[]>(initialSavedSearches);
-  const [recentSearches, setRecentSearches] =
-    useState<RecentSearch[]>(initialRecentSearches);
+    useState<SavedSearch[]>(defaultSavedSearches);
+  const [hits, setHits] = useState<Record<number, number>>({});
+  const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
 
-  /* -------- Calculate saved search hits dynamically -------- */
+  const requestId = useRef(0);
+
+  /* -------- Restore saved/recent searches (browser only) -------- */
 
   useEffect(() => {
-    const loadHits = async () => {
-      try {
-        const logs = await logsApi.getAll();
-
-        setSavedSearches((prev) =>
-          prev.map((search) => ({
-            ...search,
-            hits: logs.filter((l) =>
-              l.message?.toLowerCase().includes(search.query.toLowerCase())
-            ).length,
-          }))
-        );
-      } catch (err) {
-        console.error("Failed to compute saved search hits:", err);
-      }
-    };
-
-    loadHits();
+    setSavedSearches(loadStored(SAVED_KEY, defaultSavedSearches));
+    setRecentSearches(loadStored(RECENT_KEY, []));
   }, []);
+
+  /* -------- Hit counts come from the same search the results use -------- */
+
+  const savedKey = savedSearches.map((x) => `${x.id}:${x.query}`).join("|");
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHits = async () => {
+      const entries = await Promise.all(
+        savedSearches.map(async (search) => {
+          try {
+            return [search.id, await logsApi.count(search.query, timeRange)] as const;
+          } catch {
+            return [search.id, undefined] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      const next: Record<number, number> = {};
+      for (const [id, count] of entries) if (count !== undefined) next[id] = count;
+      setHits(next);
+    };
+    loadHits();
+    return () => {
+      cancelled = true;
+    };
+    // savedKey changes exactly when the list of queries changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey, timeRange]);
 
   /* -------- Run search -------- */
 
-  const runSearch = useCallback(async (q: string) => {
-    if (!q.trim()) return;
+  const runSearch = useCallback(async (q: string, range: TimeRange) => {
+    const query = q.trim();
+    if (!query) {
+      requestId.current++;
+      setResults([]);
+      setHasSearched(false);
+      setSearchError(null);
+      setIsSearching(false);
+      return;
+    }
+
+    const id = ++requestId.current;
+    setIsSearching(true);
+    setSearchError(null);
 
     try {
-      const data = await logsApi.search(q);
+      const data = await logsApi.search(query, range);
+      if (id !== requestId.current) return; // a newer search superseded this one
 
       setResults(data);
+      setActiveTerms(parseSearchTerms(query));
+      setLastQuery(query);
       setHasSearched(true);
 
       setRecentSearches((prev) => {
-        const without = prev.filter((s) => s.query !== q);
-        return [{ query: q, time: "just now" }, ...without].slice(0, 6);
+        const without = prev.filter((s) => s.query !== query);
+        const next = [{ query, at: Date.now() }, ...without].slice(0, MAX_RECENT);
+        saveStored(RECENT_KEY, next);
+        return next;
       });
     } catch (error) {
+      if (id !== requestId.current) return;
       console.error("Search failed:", error);
+      setSearchError("Search failed. Check that the backend is reachable and try again.");
+      setHasSearched(true);
+      setResults([]);
+    } finally {
+      if (id === requestId.current) setIsSearching(false);
     }
   }, []);
 
-  /* -------- Auto run search from URL -------- */
+  /* -------- Auto run search from URL (header search box) -------- */
 
   useEffect(() => {
     const q = searchParams.get("q");
-
     if (q) {
       setSearchQuery(q);
-      runSearch(q);
+      runSearch(q, "all");
+      setTimeRange("all");
     }
   }, [searchParams, runSearch]);
 
-  const handleSearch = () => runSearch(searchQuery);
+  const handleSearch = () => runSearch(searchQuery, timeRange);
+
+  const handleRangeChange = (value: string) => {
+    const range = value as TimeRange;
+    setTimeRange(range);
+    if (hasSearched && searchQuery.trim()) runSearch(searchQuery, range);
+  };
 
   const loadQuery = (q: string) => {
     setSearchQuery(q);
-    runSearch(q);
+    runSearch(q, timeRange);
   };
 
   const deleteSaved = (id: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSavedSearches((prev) => prev.filter((s) => s.id !== id));
+    setSavedSearches((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      saveStored(SAVED_KEY, next);
+      return next;
+    });
   };
 
   const deleteRecent = (query: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setRecentSearches((prev) => prev.filter((s) => s.query !== query));
+    setRecentSearches((prev) => {
+      const next = prev.filter((s) => s.query !== query);
+      saveStored(RECENT_KEY, next);
+      return next;
+    });
   };
 
   return (
@@ -176,7 +262,7 @@ function SearchContent() {
                 <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
 
                 <Input
-                  placeholder="Enter search query"
+                  placeholder="Search logs... e.g. malicious, level:ERROR, service:ml-model-upload"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -188,8 +274,7 @@ function SearchContent() {
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                     onClick={() => {
                       setSearchQuery("");
-                      setHasSearched(false);
-                      setResults([]);
+                      runSearch("", timeRange);
                     }}
                   >
                     <X className="w-4 h-4" />
@@ -198,7 +283,7 @@ function SearchContent() {
 
               </div>
 
-              <Select value={timeRange} onValueChange={setTimeRange}>
+              <Select value={timeRange} onValueChange={handleRangeChange}>
 
                 <SelectTrigger className="w-[140px] h-12 bg-input border-border">
                   <Clock className="w-4 h-4 mr-2" />
@@ -206,6 +291,7 @@ function SearchContent() {
                 </SelectTrigger>
 
                 <SelectContent>
+                  <SelectItem value="all">All time</SelectItem>
                   <SelectItem value="15m">Last 15 min</SelectItem>
                   <SelectItem value="1h">Last 1 hour</SelectItem>
                   <SelectItem value="24h">Last 24 hours</SelectItem>
@@ -217,6 +303,7 @@ function SearchContent() {
 
               <Button
                 onClick={handleSearch}
+                disabled={isSearching}
                 className="h-12 px-6 bg-primary text-primary-foreground"
               >
                 <Play className="w-4 h-4 mr-2" />
@@ -269,7 +356,7 @@ function SearchContent() {
 
                     <div className="flex items-center gap-1">
 
-                      <Badge variant="outline">{search.hits}</Badge>
+                      <Badge variant="outline">{hits[search.id] ?? "–"}</Badge>
 
                       <button
                         className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
@@ -301,6 +388,12 @@ function SearchContent() {
 
               <CardContent className="space-y-2">
 
+                {recentSearches.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    Your searches will show up here.
+                  </p>
+                )}
+
                 {recentSearches.map((search, idx) => (
 
                   <div
@@ -316,7 +409,7 @@ function SearchContent() {
                     <div className="flex items-center gap-1">
 
                       <span className="text-xs text-muted-foreground">
-                        {search.time}
+                        {timeAgo(search.at)}
                       </span>
 
                       <button
@@ -347,6 +440,11 @@ function SearchContent() {
                 {hasSearched
                   ? `Search Results (${results.length})`
                   : "Enter a query to search"}
+                {isSearching && hasSearched && (
+                  <span className="ml-2 text-sm font-normal text-muted-foreground">
+                    updating...
+                  </span>
+                )}
               </CardTitle>
             </CardHeader>
 
@@ -358,13 +456,29 @@ function SearchContent() {
 
                   <div className="space-y-3">
 
-                    {results.length === 0 ? (
+                    {searchError ? (
+
+                      <div className="flex flex-col items-center justify-center h-[300px] text-destructive">
+
+                        <AlertTriangle className="w-12 h-12 mb-3 opacity-40" />
+
+                        <p>{searchError}</p>
+
+                      </div>
+
+                    ) : results.length === 0 ? (
 
                       <div className="flex flex-col items-center justify-center h-[300px] text-muted-foreground">
 
                         <SearchIcon className="w-12 h-12 mb-3 opacity-20" />
 
-                        <p>No results found for "{searchQuery}"</p>
+                        <p>No results found for &quot;{lastQuery}&quot;</p>
+
+                        {timeRange !== "all" && (
+                          <p className="text-sm mt-2">
+                            Try widening the time range.
+                          </p>
+                        )}
 
                       </div>
 
@@ -377,21 +491,37 @@ function SearchContent() {
                           className="p-4 rounded-lg bg-secondary/30 hover:bg-secondary/50"
                         >
 
-                          <div className="flex items-center gap-3 mb-2">
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
 
-                            <span className="text-xs text-muted-foreground font-mono">
-                              {result.timestamp}
+                            <span
+                              className="text-xs text-muted-foreground font-mono"
+                              title={result.timestamp}
+                            >
+                              {formatTimestamp(result.timestamp)}
                             </span>
 
+                            <Badge
+                              className={cn(
+                                "text-xs",
+                                levelColors[result.level] ?? levelColors.INFO
+                              )}
+                            >
+                              {result.level}
+                            </Badge>
+
                             <Badge variant="outline">
-                              {result.source}
+                              {highlightText(result.source, activeTerms)}
+                            </Badge>
+
+                            <Badge variant="outline">
+                              {highlightText(result.service, activeTerms)}
                             </Badge>
 
                           </div>
 
                           <p className="text-sm font-mono">
 
-                            {highlightText(result.message ?? "", searchQuery)}
+                            {highlightText(result.message ?? "", activeTerms)}
 
                           </p>
 
@@ -411,10 +541,16 @@ function SearchContent() {
 
                   <SearchIcon className="w-16 h-16 mb-4 opacity-20" />
 
-                  <p className="text-lg">Start searching your security data</p>
+                  <p className="text-lg">
+                    {isSearching ? "Searching..." : "Start searching your security data"}
+                  </p>
 
-                  <p className="text-sm mt-2">
-                    Use query syntax like: level:ERROR AND source:firewall-01
+                  <p className="text-sm mt-2 text-center max-w-md">
+                    Try: malicious · level:ERROR · service:ml-model-upload AND malicious · &quot;rows malicious&quot;
+                  </p>
+
+                  <p className="text-xs mt-1">
+                    Fields: level, source, service, prediction, message, id
                   </p>
 
                 </div>
